@@ -12,12 +12,13 @@ namespace KeyPad2Xbox.Core
         private ViGEmClient? _client;
         private IXbox360Controller? _pad;
         private IntPtr _interceptionContext;
+        private volatile bool _stopping;
         private readonly KeyMapper _keyMapper;
 
         // KRİTİK NOT: Delegate'in GC (Garbage Collector) tarafından toplanmasını önlemek için
         // static readonly field olarak tanımlıyoruz. Aksi takdirde AccessViolationException alınır.
         private static readonly InterceptionNative.Predicate _isKeyboard = 
-            device => InterceptionNative.interception_is_keyboard(device);
+            device => InterceptionNative.IsKeyboard(device);
 
         public GamepadEngine()
         {
@@ -89,16 +90,19 @@ namespace KeyPad2Xbox.Core
             Stroke stroke = new Stroke();
 
             // 3. Ana Döngü (Main Loop)
-            while (true)
+            while (!_stopping)
             {
                 // Blocking wait (tavsiye edilen kullanım)
                 int device = InterceptionNative.interception_wait(_interceptionContext);
-                
+
+                // Context destroyed (Ctrl+C veya hata) — döngüden temiz çıkış
+                if (_stopping || device == 0 || _interceptionContext == IntPtr.Zero) break;
+
                 // Event'i al
                 if (InterceptionNative.interception_receive(_interceptionContext, device, ref stroke, 1) > 0)
                 {
                     // Eğer hedef klavye değilse ya da bir şekilde mouse eventi ise doğrudan geçir (pass-through)
-                    if (InterceptionNative.interception_is_keyboard(device) == 0 || device != targetDeviceId)
+                    if (InterceptionNative.IsKeyboard(device) == 0 || device != targetDeviceId)
                     {
                         InterceptionNative.interception_send(_interceptionContext, device, ref stroke, 1);
                         continue;
@@ -140,8 +144,26 @@ namespace KeyPad2Xbox.Core
             }
         }
 
+        /// <summary>
+        /// Ctrl+C handler'ından çağrılır. interception_wait'i unblock etmek için
+        /// context'i yıkarak ana döngünün temiz bir şekilde çıkmasını sağlar.
+        /// </summary>
+        public void RequestStop()
+        {
+            _stopping = true;
+            // Context'i yık — bu interception_wait'in 0 döndürmesini sağlar
+            var ctx = _interceptionContext;
+            _interceptionContext = IntPtr.Zero;
+            if (ctx != IntPtr.Zero)
+            {
+                InterceptionNative.interception_destroy_context(ctx);
+            }
+        }
+
         public void Dispose()
         {
+            _stopping = true;
+
             if (_pad != null)
             {
                 try { _pad.Disconnect(); } catch { }
@@ -154,6 +176,7 @@ namespace KeyPad2Xbox.Core
                 _client = null;
             }
 
+            // RequestStop zaten yıkmış olabilir — guard ile çift-yıkımı önle
             if (_interceptionContext != IntPtr.Zero)
             {
                 InterceptionNative.interception_destroy_context(_interceptionContext);

@@ -43,6 +43,15 @@ namespace KeyPad2Xbox.ConsoleApp
                     }
                 }
 
+                // Ctrl+C ile temiz çıkış: interception_wait blocking olduğu için
+                // context'i yıkarak unblock etmemiz gerekiyor, aksi halde Dispose çalışmaz.
+                Console.CancelKeyPress += (sender, e) =>
+                {
+                    e.Cancel = true; // Hemen kapanmayı engelle, cleanup'ın çalışmasını bekle
+                    Console.WriteLine("\n[Bilgi] Ctrl+C algılandı, çıkılıyor...");
+                    engine.RequestStop();
+                };
+
                 engine.Start(selectedDeviceId);
             }
             catch (Exception ex)

@@ -40,10 +40,17 @@ namespace KeyPad2Xbox.Core.Native
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int interception_get_hardware_id(IntPtr context, int device, IntPtr hardwareIdBuffer, uint bufferSize);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int interception_is_keyboard(int device);
+        // interception_is_keyboard and interception_is_mouse are static inline functions
+        // in the C header (interception.h), NOT exported from interception.dll.
+        // P/Invoke would fail with EntryPointNotFoundException. Implemented in C# instead.
+        public static int IsKeyboard(int device)
+        {
+            return (device >= 1 && device <= MAX_KEYBOARD) ? 1 : 0;
+        }
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int interception_is_mouse(int device);
+        public static int IsMouse(int device)
+        {
+            return (device >= MAX_KEYBOARD + 1 && device <= MAX_DEVICE) ? 1 : 0;
+        }
     }
 }
