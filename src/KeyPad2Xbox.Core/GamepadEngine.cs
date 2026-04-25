@@ -48,9 +48,10 @@ namespace KeyPad2Xbox.Core
                 throw new InvalidOperationException(
                     "Interception driver kurulu değil veya sistem reboot edilmedi.");
             }
-
-            InterceptionNative.interception_set_filter(
-                _interceptionContext, _isKeyboard, InterceptionNative.FILTER_KEY_ALL);
+            // Filter intentionally NOT set here. Setting FILTER_KEY_ALL before the
+            // user picks a keyboard would lock both keyboards while we're waiting
+            // on Console.ReadLine — the user can't type the device number.
+            // The filter is enabled in Start() once the target device is known.
         }
 
         public List<KeyboardInfo> GetConnectedKeyboards()
@@ -91,8 +92,37 @@ namespace KeyPad2Xbox.Core
             Console.WriteLine("[Bilgi] Hedef klavyeden ESC tuşuna basarak çıkabilirsiniz.");
             Console.WriteLine("[Bilgi] Diğer klavyeleriniz normal çalışmaya devam eder.");
 
+            // Activate the filter only now — we want to start swallowing keys
+            // exclusively after the user has selected the target device.
+            InterceptionNative.interception_set_filter(
+                _interceptionContext, _isKeyboard, InterceptionNative.FILTER_KEY_ALL);
+
             Stroke stroke = new Stroke();
 
+            try
+            {
+                RunLoop(targetDeviceId, ref stroke);
+            }
+            finally
+            {
+                // Clear the filter so non-target keyboards aren't briefly choked
+                // during teardown if the context destroy is delayed.
+                IntPtr ctx = Volatile.Read(ref _interceptionContext);
+                if (ctx != IntPtr.Zero)
+                {
+                    try
+                    {
+                        InterceptionNative.interception_set_filter(
+                            ctx, _isKeyboard, InterceptionNative.FILTER_KEY_NONE);
+                    }
+                    catch { }
+                }
+                ReleaseAllButtons();
+            }
+        }
+
+        private void RunLoop(int targetDeviceId, ref Stroke stroke)
+        {
             while (!_stopping)
             {
                 IntPtr ctx = Volatile.Read(ref _interceptionContext);
@@ -139,8 +169,6 @@ namespace KeyPad2Xbox.Core
                 }
                 // Eşleşmeyen tuşlar bilinçli olarak yutulur — hedef klavye Windows'a yazmamalı.
             }
-
-            ReleaseAllButtons();
         }
 
         private void ReleaseAllButtons()
