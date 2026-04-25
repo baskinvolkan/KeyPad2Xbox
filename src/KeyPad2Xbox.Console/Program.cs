@@ -5,11 +5,21 @@ namespace KeyPad2Xbox.ConsoleApp
 {
     class Program
     {
-        static void Main(string[] args)
+        static int Main(string[] args)
         {
             Console.WriteLine("=== KeyPad2Xbox Başlatılıyor ===");
 
             using var engine = new GamepadEngine();
+
+            // Ctrl+C handler'ı ilk fırsatta bağla — kullanıcı prompt sırasında bile
+            // basabilir, bu durumda Dispose'un çalışmasını garanti etmek istiyoruz.
+            Console.CancelKeyPress += (sender, e) =>
+            {
+                e.Cancel = true;
+                Console.WriteLine("\n[Bilgi] Ctrl+C algılandı, çıkılıyor...");
+                engine.RequestStop();
+            };
+
             try
             {
                 engine.Initialize();
@@ -19,7 +29,7 @@ namespace KeyPad2Xbox.ConsoleApp
                 if (keyboards.Count == 0)
                 {
                     Console.WriteLine("[Hata] Hiç klavye bulunamadı veya Interception driver tetiklenmiyor.");
-                    return;
+                    return 1;
                 }
 
                 Console.WriteLine("\n[Klavyeler]");
@@ -33,6 +43,7 @@ namespace KeyPad2Xbox.ConsoleApp
                 {
                     Console.Write("\nLütfen Xbox Controller'a çevrilecek klavyenin numarasını girin: ");
                     string? input = Console.ReadLine();
+                    if (input == null) return 1; // stdin kapandı (örn. Ctrl+C sonrası)
                     if (int.TryParse(input, out int choice) && choice >= 1 && choice <= keyboards.Count)
                     {
                         selectedDeviceId = keyboards[choice - 1].DeviceId;
@@ -43,16 +54,8 @@ namespace KeyPad2Xbox.ConsoleApp
                     }
                 }
 
-                // Ctrl+C ile temiz çıkış: interception_wait blocking olduğu için
-                // context'i yıkarak unblock etmemiz gerekiyor, aksi halde Dispose çalışmaz.
-                Console.CancelKeyPress += (sender, e) =>
-                {
-                    e.Cancel = true; // Hemen kapanmayı engelle, cleanup'ın çalışmasını bekle
-                    Console.WriteLine("\n[Bilgi] Ctrl+C algılandı, çıkılıyor...");
-                    engine.RequestStop();
-                };
-
                 engine.Start(selectedDeviceId);
+                return 0;
             }
             catch (Exception ex)
             {
@@ -60,11 +63,11 @@ namespace KeyPad2Xbox.ConsoleApp
                 Console.WriteLine($"[Kritik Hata] {ex.Message}");
                 Console.ResetColor();
                 Console.WriteLine("\nNot: Uygulamayı Administrator (Yönetici) olarak çalıştırmayı unutmayın.");
+                return 1;
             }
             finally
             {
                 Console.WriteLine("Temizlik işlemi yapılıyor...");
-                // using bloğu GamepadEngine'in Dispose metodunu otomatik çağırıp cleanup yapacaktır.
             }
         }
     }

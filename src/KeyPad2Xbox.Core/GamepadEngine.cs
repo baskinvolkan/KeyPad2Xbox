@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using KeyPad2Xbox.Core.Native;
 using Nefarius.ViGEm.Client;
 using Nefarius.ViGEm.Client.Targets;
@@ -9,15 +10,17 @@ namespace KeyPad2Xbox.Core
 {
     public class GamepadEngine : IDisposable
     {
+        private const int HardwareIdBufferBytes = 512;
+
         private ViGEmClient? _client;
         private IXbox360Controller? _pad;
         private IntPtr _interceptionContext;
         private volatile bool _stopping;
         private readonly KeyMapper _keyMapper;
 
-        // KRİTİK NOT: Delegate'in GC (Garbage Collector) tarafından toplanmasını önlemek için
-        // static readonly field olarak tanımlıyoruz. Aksi takdirde AccessViolationException alınır.
-        private static readonly InterceptionNative.Predicate _isKeyboard = 
+        // Delegate must be kept alive — passed to native filter and stored by the DLL.
+        // Without a managed reference the GC reclaims it and the next callback hits AVException.
+        private static readonly InterceptionNative.Predicate _isKeyboard =
             device => InterceptionNative.IsKeyboard(device);
 
         public GamepadEngine()
@@ -27,7 +30,6 @@ namespace KeyPad2Xbox.Core
 
         public void Initialize()
         {
-            // 1. ViGEmClient başlatılıyor
             try
             {
                 _client = new ViGEmClient();
@@ -36,18 +38,19 @@ namespace KeyPad2Xbox.Core
             }
             catch (Exception ex)
             {
-                throw new Exception("ViGEmBus driver kurulu değil veya başlatılamadı. Hata: " + ex.Message);
+                throw new InvalidOperationException(
+                    "ViGEmBus driver kurulu değil veya başlatılamadı.", ex);
             }
 
-            // 2. Interception başlatılıyor
             _interceptionContext = InterceptionNative.interception_create_context();
             if (_interceptionContext == IntPtr.Zero)
             {
-                throw new Exception("Interception driver kurulu değil veya sistem reboot edilmedi.");
+                throw new InvalidOperationException(
+                    "Interception driver kurulu değil veya sistem reboot edilmedi.");
             }
 
-            // Sadece klavye eventlarını filtrele
-            InterceptionNative.interception_set_filter(_interceptionContext, _isKeyboard, InterceptionNative.FILTER_KEY_ALL);
+            InterceptionNative.interception_set_filter(
+                _interceptionContext, _isKeyboard, InterceptionNative.FILTER_KEY_ALL);
         }
 
         public List<KeyboardInfo> GetConnectedKeyboards()
@@ -55,12 +58,13 @@ namespace KeyPad2Xbox.Core
             var list = new List<KeyboardInfo>();
             if (_interceptionContext == IntPtr.Zero) return list;
 
-            IntPtr buffer = Marshal.AllocHGlobal(500);
+            IntPtr buffer = Marshal.AllocHGlobal(HardwareIdBufferBytes);
             try
             {
                 for (int i = 1; i <= InterceptionNative.MAX_KEYBOARD; i++)
                 {
-                    int length = InterceptionNative.interception_get_hardware_id(_interceptionContext, i, buffer, 500);
+                    int length = InterceptionNative.interception_get_hardware_id(
+                        _interceptionContext, i, buffer, HardwareIdBufferBytes);
                     if (length > 0)
                     {
                         string hardwareId = Marshal.PtrToStringUni(buffer) ?? "Unknown";
@@ -89,71 +93,77 @@ namespace KeyPad2Xbox.Core
 
             Stroke stroke = new Stroke();
 
-            // 3. Ana Döngü (Main Loop)
             while (!_stopping)
             {
-                // Blocking wait (tavsiye edilen kullanım)
-                int device = InterceptionNative.interception_wait(_interceptionContext);
+                IntPtr ctx = Volatile.Read(ref _interceptionContext);
+                if (ctx == IntPtr.Zero) break;
 
-                // Context destroyed (Ctrl+C veya hata) — döngüden temiz çıkış
-                if (_stopping || device == 0 || _interceptionContext == IntPtr.Zero) break;
+                int device = InterceptionNative.interception_wait(ctx);
 
-                // Event'i al
-                if (InterceptionNative.interception_receive(_interceptionContext, device, ref stroke, 1) > 0)
+                if (_stopping || device == 0) break;
+
+                ctx = Volatile.Read(ref _interceptionContext);
+                if (ctx == IntPtr.Zero) break;
+
+                if (InterceptionNative.interception_receive(ctx, device, ref stroke, 1) <= 0)
                 {
-                    // Eğer hedef klavye değilse ya da bir şekilde mouse eventi ise doğrudan geçir (pass-through)
-                    if (InterceptionNative.IsKeyboard(device) == 0 || device != targetDeviceId)
-                    {
-                        InterceptionNative.interception_send(_interceptionContext, device, ref stroke, 1);
-                        continue;
-                    }
-
-                    // ====== Hedef Klavye İşlemleri ======
-                    
-                    ushort code = stroke.code;
-                    ushort state = stroke.state;
-
-                    // ESC = 0x01 (Uygulamadan temiz çıkış)
-                    if (code == 0x01)
-                    {
-                        Console.WriteLine("[Bilgi] ESC tuşuna basıldı. Uygulamadan çıkılıyor...");
-                        break;
-                    }
-
-                    // Tuş durumlarını ayrıştırma (State)
-                    // KEY_DOWN = 0x00, KEY_UP = 0x01, KEY_E0 = 0x02, KEY_E0_UP = 0x03
-                    bool isPressed = (state & 0x01) == 0;
-                    bool isExtended = (state & 0x02) != 0;
-
-                    // Mapper üzerinden çeviri yapmayı dene
-                    bool mapped = _keyMapper.TryMap(code, isExtended, isPressed, _pad);
-
-                    if (mapped)
-                    {
-                        // gamepad'e veriyi yolla
-                        _pad.SubmitReport();
-                        // Tuş mapper tarafından yakalandıysa, interception_send çağırma (tuş yutulur)
-                    }
-                    else
-                    {
-                        // Eşleştirilmemiş tuşlar da yutulabilir ama isterseniz Windows'a gönderebilirsiniz.
-                        // Talebe göre: "Seçilen klavyenin tuşları Windows'a gitmeyecek (yutulacak)"
-                        // Bu yüzden interception_send ÇAĞRILMAYACAK. (Sadece mapping var ise tetiklenir, geri kalan tuşlar void'e düşer)
-                    }
+                    continue;
                 }
+
+                bool isTargetKeyboard =
+                    InterceptionNative.IsKeyboard(device) != 0 && device == targetDeviceId;
+
+                if (!isTargetKeyboard)
+                {
+                    InterceptionNative.interception_send(ctx, device, ref stroke, 1);
+                    continue;
+                }
+
+                ushort code = stroke.code;
+                ushort state = stroke.state;
+
+                // ESC = scan code 0x01 → temiz çıkış
+                if (code == 0x01)
+                {
+                    Console.WriteLine("[Bilgi] ESC tuşuna basıldı. Uygulamadan çıkılıyor...");
+                    break;
+                }
+
+                // KEY_DOWN=0x00, KEY_UP=0x01, KEY_E0=0x02, KEY_E0_UP=0x03
+                bool isPressed = (state & 0x01) == 0;
+                bool isExtended = (state & 0x02) != 0;
+
+                if (_keyMapper.TryMap(code, isExtended, isPressed, _pad))
+                {
+                    _pad.SubmitReport();
+                }
+                // Eşleşmeyen tuşlar bilinçli olarak yutulur — hedef klavye Windows'a yazmamalı.
+            }
+
+            ReleaseAllButtons();
+        }
+
+        private void ReleaseAllButtons()
+        {
+            try
+            {
+                _pad?.ResetReport();
+                _pad?.SubmitReport();
+            }
+            catch
+            {
+                // Pad zaten disconnect olmuş olabilir — yutmak güvenli.
             }
         }
 
         /// <summary>
-        /// Ctrl+C handler'ından çağrılır. interception_wait'i unblock etmek için
-        /// context'i yıkarak ana döngünün temiz bir şekilde çıkmasını sağlar.
+        /// Ctrl+C handler'ından çağrılır. interception_wait blocking olduğu için
+        /// context'i atomik şekilde devralıp yıkarak ana döngüyü unblock eder.
         /// </summary>
         public void RequestStop()
         {
             _stopping = true;
-            // Context'i yık — bu interception_wait'in 0 döndürmesini sağlar
-            var ctx = _interceptionContext;
-            _interceptionContext = IntPtr.Zero;
+            IntPtr ctx = Interlocked.Exchange(ref _interceptionContext, IntPtr.Zero);
             if (ctx != IntPtr.Zero)
             {
                 InterceptionNative.interception_destroy_context(ctx);
@@ -164,23 +174,24 @@ namespace KeyPad2Xbox.Core
         {
             _stopping = true;
 
-            if (_pad != null)
+            IntPtr ctx = Interlocked.Exchange(ref _interceptionContext, IntPtr.Zero);
+            if (ctx != IntPtr.Zero)
             {
-                try { _pad.Disconnect(); } catch { }
-                _pad = null;
+                InterceptionNative.interception_destroy_context(ctx);
             }
 
-            if (_client != null)
+            var pad = _pad;
+            _pad = null;
+            if (pad != null)
             {
-                try { _client.Dispose(); } catch { }
-                _client = null;
+                try { pad.Disconnect(); } catch { }
             }
 
-            // RequestStop zaten yıkmış olabilir — guard ile çift-yıkımı önle
-            if (_interceptionContext != IntPtr.Zero)
+            var client = _client;
+            _client = null;
+            if (client != null)
             {
-                InterceptionNative.interception_destroy_context(_interceptionContext);
-                _interceptionContext = IntPtr.Zero;
+                try { client.Dispose(); } catch { }
             }
         }
     }
